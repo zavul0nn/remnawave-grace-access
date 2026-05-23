@@ -1,0 +1,21 @@
+version: "3"
+
+services:
+  worker:
+    build:
+      context: .
+    container_name: remna-expired-squad-worker
+    restart: always
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      STATE_DB_PATH: ${STATE_DB_PATH:-./data/state.sqlite3}
+    volumes:
+      - .:/usr/src/app
+    networks:
+      - network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+networks:
+  network:

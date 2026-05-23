@@ -1,0 +1,2 @@
+environs==14.1.1
+remnawave==2.7.1
