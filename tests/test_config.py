@@ -37,3 +37,19 @@ def test_load_config_can_use_single_target_squad_as_fallback(monkeypatch) -> Non
         "EXPIRED": UUID(EXPIRED_SQUAD),
         "LIMITED": UUID(EXPIRED_SQUAD),
     }
+
+
+def test_load_config_supports_bot_backend(monkeypatch) -> None:
+    monkeypatch.setenv("API_BACKEND", "bot")
+    monkeypatch.setenv("BOT_API_BASE", "https://bot.example.test/")
+    monkeypatch.setenv("BOT_API_KEY", "api-key")
+    monkeypatch.setenv("TARGET_EXPIRED_SQUAD_UUID", EXPIRED_SQUAD)
+    monkeypatch.setenv("TARGET_LIMITED_SQUAD_UUID", LIMITED_SQUAD)
+
+    config = load_config()
+
+    assert config.api_backend == "bot"
+    assert config.bot_api is not None
+    assert config.bot_api.api_base == "https://bot.example.test"
+    assert config.bot_api.api_key == "api-key"
+    assert config.page_size == 200

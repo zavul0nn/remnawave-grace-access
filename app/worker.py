@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Protocol
@@ -24,6 +25,18 @@ class UsersApi(Protocol):
         ...
 
     async def reset_user_traffic(self, uuid: str):
+        ...
+
+    async def extend_subscription(self, subscription_id: int, days: int):
+        ...
+
+    async def add_subscription_squad(self, subscription_id: int, squad_uuid: str):
+        ...
+
+    async def remove_subscription_squad(self, subscription_id: int, squad_uuid: str):
+        ...
+
+    async def add_subscription_traffic(self, subscription_id: int, gb: int):
         ...
 
 
@@ -173,6 +186,28 @@ async def process_user(
     *,
     target_squad_uuid: UUID,
 ) -> datetime:
+    if config.api_backend == "bot":
+        return await process_bot_subscription(
+            config,
+            sdk,
+            user,
+            target_squad_uuid=target_squad_uuid,
+        )
+    return await process_remnawave_user(
+        config,
+        sdk,
+        user,
+        target_squad_uuid=target_squad_uuid,
+    )
+
+
+async def process_remnawave_user(
+    config: WorkerConfig,
+    sdk: RemnawaveApi,
+    user: object,
+    *,
+    target_squad_uuid: UUID,
+) -> datetime:
     user_uuid = UUID(str(getattr(user, "uuid")))
     expire_at = calculate_extended_expire_at(
         getattr(user, "expire_at"),
@@ -205,6 +240,61 @@ async def process_user(
         )
     )
     return expire_at
+
+
+async def process_bot_subscription(
+    config: WorkerConfig,
+    sdk: RemnawaveApi,
+    user: object,
+    *,
+    target_squad_uuid: UUID,
+) -> datetime:
+    subscription_id = int(getattr(user, "subscription_id", getattr(user, "uuid")))
+    current_squads = extract_internal_squad_uuids(user)
+    expire_at = calculate_extended_expire_at(
+        getattr(user, "expire_at", None),
+        extend_days=config.extend_days,
+    )
+    traffic_limit_gb = bytes_to_gib(config.traffic_limit_bytes)
+
+    logger.info(
+        "%s subscription id=%s user_id=%s squads=%s extend_days=%s traffic_limit_gb=%s",
+        "DRY-RUN would update" if config.dry_run else "Updating",
+        subscription_id,
+        getattr(user, "user_id", None),
+        [str(target_squad_uuid)],
+        config.extend_days,
+        traffic_limit_gb,
+    )
+
+    if config.dry_run:
+        return expire_at
+
+    users_api = sdk.users
+    response = await users_api.extend_subscription(subscription_id, config.extend_days)
+    await users_api.add_subscription_squad(subscription_id, str(target_squad_uuid))
+    for squad_uuid in current_squads:
+        if squad_uuid != target_squad_uuid:
+            await users_api.remove_subscription_squad(subscription_id, str(squad_uuid))
+    if traffic_limit_gb > 0:
+        await users_api.add_subscription_traffic(subscription_id, traffic_limit_gb)
+
+    return parse_response_expire_at(response) or expire_at
+
+
+def bytes_to_gib(value: int) -> int:
+    if value <= 0:
+        return 0
+    return math.ceil(value / (1024 ** 3))
+
+
+def parse_response_expire_at(response: object) -> datetime | None:
+    if not isinstance(response, dict):
+        return None
+    raw = response.get("end_date")
+    if not isinstance(raw, str) or not raw:
+        return None
+    return datetime.fromisoformat(raw.replace("Z", "+00:00"))
 
 
 def get_target_squad_for_status(config: WorkerConfig, status: str) -> UUID | None:

@@ -23,6 +23,10 @@ class FakeUsersApi:
         self.users = users
         self.updates = []
         self.traffic_resets = []
+        self.extensions = []
+        self.added_squads = []
+        self.removed_squads = []
+        self.added_traffic = []
 
     async def get_all_users(self, start: int | None = None, size: int | None = None):
         start = start or 0
@@ -38,6 +42,22 @@ class FakeUsersApi:
     async def reset_user_traffic(self, uuid: str):
         self.traffic_resets.append(uuid)
 
+    async def extend_subscription(self, subscription_id: int, days: int):
+        self.extensions.append((subscription_id, days))
+        return {
+            "id": subscription_id,
+            "end_date": "2026-01-04T00:00:00Z",
+        }
+
+    async def add_subscription_squad(self, subscription_id: int, squad_uuid: str):
+        self.added_squads.append((subscription_id, squad_uuid))
+
+    async def remove_subscription_squad(self, subscription_id: int, squad_uuid: str):
+        self.removed_squads.append((subscription_id, squad_uuid))
+
+    async def add_subscription_traffic(self, subscription_id: int, gb: int):
+        self.added_traffic.append((subscription_id, gb))
+
 
 class FakeSdk:
     def __init__(self, users: list[object]) -> None:
@@ -47,12 +67,14 @@ class FakeSdk:
 @pytest.fixture()
 def config(tmp_path: Path) -> WorkerConfig:
     return WorkerConfig(
+        api_backend="remnawave",
         remnawave=RemnawaveConfig(
             api_base="https://example.test/api",
             api_token="token",
             caddy_token=None,
             ssl_ignore=False,
         ),
+        bot_api=None,
         target_squads_by_status={
             "EXPIRED": EXPIRED_TARGET_SQUAD,
             "LIMITED": LIMITED_TARGET_SQUAD,
@@ -72,6 +94,21 @@ def make_user(*, status: str, uuid: UUID | None = None, squads=None):
     return SimpleNamespace(
         uuid=uuid or uuid4(),
         username="user",
+        status=status,
+        expire_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        active_internal_squads=[
+            SimpleNamespace(uuid=squad_uuid)
+            for squad_uuid in (squads or [])
+        ],
+    )
+
+
+def make_subscription(*, status: str, subscription_id: int = 123, squads=None):
+    return SimpleNamespace(
+        uuid=str(subscription_id),
+        subscription_id=subscription_id,
+        user_id=456,
+        username="user:456",
         status=status,
         expire_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         active_internal_squads=[
@@ -298,5 +335,39 @@ async def test_dry_run_marks_processed_without_calling_update(
         saved_state = state.get(str(sdk.users.users[0].uuid))
         assert saved_state is not None
         assert saved_state.last_extended_at is None
+    finally:
+        state.close()
+
+
+@pytest.mark.asyncio
+async def test_bot_backend_extends_subscription_and_sets_target_squad(
+    config: WorkerConfig,
+) -> None:
+    old_squad = uuid4()
+    bot_config = replace(
+        config,
+        api_backend="bot",
+        page_size=200,
+        traffic_limit_bytes=1024 ** 3,
+    )
+    subscription = make_subscription(
+        status="expired",
+        subscription_id=123,
+        squads=[old_squad],
+    )
+    state = StateStore(bot_config.state_db_path)
+    sdk = FakeSdk([subscription])
+
+    try:
+        stats = await scan_once(bot_config, sdk, state)
+
+        assert stats.processed == 1
+        assert sdk.users.extensions == [(123, 3)]
+        assert sdk.users.added_squads == [(123, str(EXPIRED_TARGET_SQUAD))]
+        assert sdk.users.removed_squads == [(123, str(old_squad))]
+        assert sdk.users.added_traffic == [(123, 1)]
+        saved_state = state.get("123")
+        assert saved_state is not None
+        assert saved_state.extension_count == 1
     finally:
         state.close()
